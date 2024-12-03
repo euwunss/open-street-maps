@@ -14,13 +14,84 @@
 #include "dist.h"
 #include "graph.h"
 
+#include "json.hpp"
+
 using namespace std;
+using json = nlohmann::json;
+
+class prioritize {
+   public:
+    bool operator()(const pair<long long, double>& p1,
+                    const pair<long long, double>& p2) const {
+        return p1.second > p2.second;
+    }
+};
 
 double INF = numeric_limits<double>::max();
 
 void buildGraph(istream& input, graph<long long, double>& g,
                 vector<BuildingInfo>& buildings) {
-  // TODO_STUDENT
+
+  json data;
+  input >> data;
+
+  // extract buildings and add them to the graph
+  for (const auto& building : data["buildings"]) {
+    long long id = building["id"];
+    double lat = building["lat"];
+    double lon = building["lon"];
+    string name = building["name"];
+    // string abbr = building.value("abbr", "?");
+    string abbr = building["abbr"];
+
+    buildings.emplace_back(id, Coordinates{lat, lon}, name, abbr);
+    g.addVertex(id);
+  }
+
+  // extract waypoints and add them to the graph
+  for (const auto& waypoint : data["waypoints"]) {
+    long long id = waypoint["id"];
+    g.addVertex(id);
+  }
+
+  // add edges between waypoints in footways
+  for (const auto& footway : data["footways"]) {
+    for (size_t i = 0; i + 1 < footway.size(); i++) {
+      long long from = footway[i];
+      long long to = footway[i + 1];
+
+      // find corresponding coordinates for the waypoints
+      auto fromIt = find_if(
+          data["waypoints"].begin(), data["waypoints"].end(),
+          [from](const json& wp) { return wp["id"] == from; });
+
+      auto toIt = find_if(
+          data["waypoints"].begin(), data["waypoints"].end(),
+          [to](const json& wp) { return wp["id"] == to; });
+
+      if (fromIt != data["waypoints"].end() && toIt != data["waypoints"].end()) {
+          Coordinates fromCoord{(*fromIt)["lat"], (*fromIt)["lon"]};
+          Coordinates toCoord{(*toIt)["lat"], (*toIt)["lon"]};
+          double distance = distBetween2Points(fromCoord, toCoord);
+
+          g.addEdge(from, to, distance);
+          g.addEdge(to, from, distance);
+      }
+    }
+  }
+
+  // connect buildings to nearby waypoints within 0.036 miles
+  for (const auto& building : buildings) {
+    for (const auto& waypoint : data["waypoints"]) {
+      long long waypointId = waypoint["id"];
+      double distance = distBetween2Points(
+          building.location, Coordinates{waypoint["lat"], waypoint["lon"]});
+      if (distance <= 0.036) {
+          g.addEdge(building.id, waypointId, distance);
+          g.addEdge(waypointId, building.id, distance);
+      }
+    }
+  }
 }
 
 BuildingInfo getBuildingInfo(const vector<BuildingInfo>& buildings,
@@ -54,7 +125,79 @@ BuildingInfo getClosestBuilding(const vector<BuildingInfo>& buildings,
 vector<long long> dijkstra(const graph<long long, double>& G, long long start,
                            long long target,
                            const set<long long>& ignoreNodes) {
-  return vector<long long>{};
+
+  // handle case when start and target are the same
+  if (start == target) {
+      return {start};
+  }
+
+  // priority queue for exploring nodes
+  priority_queue<pair<long long, double>, vector<pair<long long, double>>, prioritize> pq;
+
+  // maps to store distances and paths
+  unordered_map<long long, double> distances;
+  unordered_map<long long, long long> prev;
+  unordered_set<long long> visited;
+
+  // initialize all distances to infinity
+  vector<long long> vertices = G.getVertices();
+  for (const auto& v : vertices) {
+      distances[v] = INF;
+  }
+  distances[start] = 0;
+
+  // start with the initial node
+  pq.push({start, 0});
+
+  while (!pq.empty()) {
+      auto curr = pq.top().first;
+      auto currDistance = pq.top().second;
+      pq.pop();
+
+      // skip visited nodes
+      if (visited.count(curr)) continue;
+      visited.insert(curr);
+
+      // stop if target is reached
+      if (curr == target) break;
+
+      // explore neighbors
+      set<long long> neighbors = G.neighbors(curr);
+      for (const auto& n : neighbors) {
+          // skip ignored nodes unless they are start or target
+          if (ignoreNodes.count(n) && n != start && n != target) {
+              continue;
+          }
+
+          // check the edge weight
+          double weight;
+          if (G.getWeight(curr, n, weight)) {
+              double newDistance = currDistance + weight;
+
+              // update if a shorter path is found
+              if (newDistance < distances[n]) {
+                  distances[n] = newDistance;
+                  prev[n] = curr;
+                  pq.push({n, newDistance});
+              }
+          }
+      }
+  }
+
+  // build the path
+  vector<long long> path;
+  if (distances[target] == INF) {
+      return {}; // return empty if no path exists
+  }
+
+  for (long long at = target; at != start; at = prev[at]) {
+      path.push_back(at);
+  }
+  path.push_back(start);
+
+  // reverse the path to get it from start to target
+  reverse(path.begin(), path.end());
+  return path;
 }
 
 double pathLength(const graph<long long, double>& G,
